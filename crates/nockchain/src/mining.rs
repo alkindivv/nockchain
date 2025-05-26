@@ -92,7 +92,11 @@ impl OptimizedMiningState {
         // Create base snapshot directory
         let snapshot_base = tempfile::tempdir()
             .expect("Failed to create base snapshot directory");
-        let snapshot_base_path = Arc::new(snapshot_base.keep().expect("Failed to keep temp directory"));
+        let snapshot_base_path = Arc::new(
+            snapshot_base.keep()
+                .map_err(|e| format!("Failed to keep temp directory: {}", e))
+                .expect("Failed to keep temp directory")
+        );
 
         // Pre-warm kernel pool with multiple instances
         let num_cores = num_cpus::get();
