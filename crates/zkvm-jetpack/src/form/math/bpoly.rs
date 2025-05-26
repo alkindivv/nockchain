@@ -312,7 +312,10 @@ pub fn bpdvr(a: &[Belt], b: &[Belt], q: &mut [Belt], res: &mut [Belt]) {
 
     while deg_r >= deg_b {
         let coeff = r[i] / b[end_b];
-        q[q_index as usize] = coeff;
+        // Add bounds check to prevent index out of bounds
+        if q_index < q.len() as u32 {
+            q[q_index as usize] = coeff;
+        }
         for k in 0..(deg_b + 1) {
             let index = k as usize;
             if k <= a_end as u32 && k < b.len() as u32 && k <= (i as u32) {
@@ -322,6 +325,10 @@ pub fn bpdvr(a: &[Belt], b: &[Belt], q: &mut [Belt], res: &mut [Belt]) {
         deg_r = deg_r.saturating_sub(1);
         q_index = q_index.saturating_sub(1);
         if deg_r == 0 && r[0] == 0 {
+            break;
+        }
+        // Prevent underflow in i
+        if i == 0 {
             break;
         }
         i -= 1;
