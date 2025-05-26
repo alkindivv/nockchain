@@ -24,27 +24,45 @@ get_system_stats() {
     echo "💻 SYSTEM RESOURCES"
     echo "==================="
 
-    # CPU usage
-    local cpu_usage=$(top -l 1 -n 0 | grep "CPU usage" | awk '{print $3}' | sed 's/%//')
-    echo "🔥 CPU Usage: ${cpu_usage}%"
+    # Detect OS and use appropriate commands
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        local cpu_usage=$(top -l 1 -n 0 | grep "CPU usage" | awk '{print $3}' | sed 's/%//')
+        echo "🔥 CPU Usage: ${cpu_usage}%"
 
-    # Memory usage
-    local memory_info=$(vm_stat | grep -E "(free|active|inactive|wired)" | awk '{print $3}' | sed 's/\.//')
-    local page_size=4096
-    local free_pages=$(echo "$memory_info" | sed -n '1p')
-    local active_pages=$(echo "$memory_info" | sed -n '2p')
-    local inactive_pages=$(echo "$memory_info" | sed -n '3p')
-    local wired_pages=$(echo "$memory_info" | sed -n '4p')
+        local memory_info=$(vm_stat | grep -E "(free|active|inactive|wired)" | awk '{print $3}' | sed 's/\.//')
+        local page_size=4096
+        local free_pages=$(echo "$memory_info" | sed -n '1p')
+        local active_pages=$(echo "$memory_info" | sed -n '2p')
+        local inactive_pages=$(echo "$memory_info" | sed -n '3p')
+        local wired_pages=$(echo "$memory_info" | sed -n '4p')
 
-    local total_memory=$((($free_pages + $active_pages + $inactive_pages + $wired_pages) * $page_size / 1024 / 1024))
-    local used_memory=$((($active_pages + $inactive_pages + $wired_pages) * $page_size / 1024 / 1024))
-    local memory_percent=$((used_memory * 100 / total_memory))
+        local total_memory=$((($free_pages + $active_pages + $inactive_pages + $wired_pages) * $page_size / 1024 / 1024))
+        local used_memory=$((($active_pages + $inactive_pages + $wired_pages) * $page_size / 1024 / 1024))
+        local memory_percent=$((used_memory * 100 / total_memory))
 
-    echo "🧠 Memory Usage: ${used_memory}MB / ${total_memory}MB (${memory_percent}%)"
+        echo "🧠 Memory Usage: ${used_memory}MB / ${total_memory}MB (${memory_percent}%)"
 
-    # Core count
-    local core_count=$(sysctl -n hw.ncpu)
-    echo "⚙️  CPU Cores: $core_count"
+        local core_count=$(sysctl -n hw.ncpu)
+        echo "⚙️  CPU Cores: $core_count"
+    else
+        # Linux
+        local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | sed 's/%us,//')
+        echo "🔥 CPU Usage: ${cpu_usage}%"
+
+        # Memory usage from /proc/meminfo
+        local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local mem_available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+        local mem_used=$((mem_total - mem_available))
+        local mem_total_mb=$((mem_total / 1024))
+        local mem_used_mb=$((mem_used / 1024))
+        local memory_percent=$((mem_used * 100 / mem_total))
+
+        echo "🧠 Memory Usage: ${mem_used_mb}MB / ${mem_total_mb}MB (${memory_percent}%)"
+
+        local core_count=$(nproc)
+        echo "⚙️  CPU Cores: $core_count"
+    fi
 }
 
 # Function to monitor mining logs

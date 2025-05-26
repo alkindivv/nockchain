@@ -300,6 +300,7 @@ impl OptimizedMiningState {
             }
 
             info!("Kernel pool initialized with {} instances", pool.len());
+            info!("🚀 Optimized mining system ready! Workers: {}, Kernel pool: {}", num_workers, pool.len());
         }
 
         Self {
@@ -422,6 +423,7 @@ pub fn create_mining_driver(
             drop(result_tx);
 
             let mut current_worker = 0;
+            let mut last_stats_time = Instant::now();
 
             loop {
                 tokio::select! {
@@ -458,6 +460,25 @@ pub fn create_mining_driver(
                                 .await
                                 .expect("Could not poke nockchain with mined PoW");
                         }
+                    },
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        // Display mining statistics every 30 seconds
+                        let elapsed = last_stats_time.elapsed();
+
+                        if elapsed >= Duration::from_secs(30) {
+                            let stats_summary = mining_state.stats.get_stats_summary().await;
+                            info!("\n{}", stats_summary);
+
+                            // Show worker stats every 2 minutes (120 seconds)
+                            if elapsed >= Duration::from_secs(120) {
+                                let worker_stats = mining_state.stats.get_worker_stats().await;
+                                info!("\n{}", worker_stats);
+                                last_stats_time = Instant::now();
+                            } else {
+                                // Reset timer for next 30-second interval
+                                last_stats_time = Instant::now();
+                            }
+                        }
                     }
                 }
             }
@@ -488,6 +509,13 @@ async fn optimized_mining_worker(
             if let Err(_) = result_tx.send(result_slab) {
                 warn!("Worker {} failed to send result", worker_id);
                 break;
+            }
+        } else {
+            // Log periodic activity to show workers are active
+            let attempts = mining_state.stats.total_attempts.load(Ordering::Relaxed);
+            if attempts % 100 == 0 && attempts > 0 {
+                debug!("Worker {} completed attempt #{}, duration: {:.3}s",
+                       worker_id, attempts, duration.as_secs_f64());
             }
         }
     }
