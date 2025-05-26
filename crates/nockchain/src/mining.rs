@@ -79,17 +79,33 @@ impl FromStr for MiningKeyConfig {
 }
 
 // Mining statistics structure
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MiningStats {
     pub start_time: Instant,
-    pub total_attempts: AtomicU64,
-    pub successful_blocks: AtomicU64,
-    pub failed_attempts: AtomicU64,
-    pub active_workers: AtomicU32,
-    pub total_hash_rate: AtomicU64,
+    pub total_attempts: Arc<AtomicU64>,
+    pub successful_blocks: Arc<AtomicU64>,
+    pub failed_attempts: Arc<AtomicU64>,
+    pub active_workers: Arc<AtomicU32>,
+    pub total_hash_rate: Arc<AtomicU64>,
     pub last_block_time: Arc<Mutex<Option<Instant>>>,
     pub average_attempt_time: Arc<Mutex<Duration>>,
     pub worker_stats: Arc<Mutex<Vec<WorkerStats>>>,
+}
+
+impl Clone for MiningStats {
+    fn clone(&self) -> Self {
+        Self {
+            start_time: self.start_time,
+            total_attempts: Arc::clone(&self.total_attempts),
+            successful_blocks: Arc::clone(&self.successful_blocks),
+            failed_attempts: Arc::clone(&self.failed_attempts),
+            active_workers: Arc::clone(&self.active_workers),
+            total_hash_rate: Arc::clone(&self.total_hash_rate),
+            last_block_time: Arc::clone(&self.last_block_time),
+            average_attempt_time: Arc::clone(&self.average_attempt_time),
+            worker_stats: Arc::clone(&self.worker_stats),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,11 +131,11 @@ impl MiningStats {
 
         Self {
             start_time: Instant::now(),
-            total_attempts: AtomicU64::new(0),
-            successful_blocks: AtomicU64::new(0),
-            failed_attempts: AtomicU64::new(0),
-            active_workers: AtomicU32::new(num_workers as u32),
-            total_hash_rate: AtomicU64::new(0),
+            total_attempts: Arc::new(AtomicU64::new(0)),
+            successful_blocks: Arc::new(AtomicU64::new(0)),
+            failed_attempts: Arc::new(AtomicU64::new(0)),
+            active_workers: Arc::new(AtomicU32::new(num_workers as u32)),
+            total_hash_rate: Arc::new(AtomicU64::new(0)),
             last_block_time: Arc::new(Mutex::new(None)),
             average_attempt_time: Arc::new(Mutex::new(Duration::from_secs(0))),
             worker_stats: Arc::new(Mutex::new(worker_stats)),
