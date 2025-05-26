@@ -443,6 +443,37 @@ pub fn create_mining_driver(
                 return Ok(());
             }
 
+            // Wait a bit for all drivers to be fully ready
+            info!("⏳ Waiting for system to be fully ready...");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // Now try to set mining key again after system is ready
+            info!("🔄 Retrying mining key setup after system initialization...");
+            if configs.len() == 1
+                && configs[0].share == 1
+                && configs[0].m == 1
+                && configs[0].keys.len() == 1
+            {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    set_mining_key(&handle, configs[0].keys[0].clone())
+                ).await {
+                    Ok(Ok(_)) => info!("✅ Mining key set successfully after retry"),
+                    Ok(Err(e)) => warn!("Failed to set mining key on retry: {:?}", e),
+                    Err(_) => warn!("Timeout setting mining key on retry"),
+                }
+            }
+
+            // Try to enable mining again
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                enable_mining(&handle, true)
+            ).await {
+                Ok(Ok(_)) => info!("✅ Mining enabled successfully after retry"),
+                Ok(Err(e)) => warn!("Failed to enable mining on retry: {:?}", e),
+                Err(_) => warn!("Timeout enabling mining on retry"),
+            }
+
             // Initialize optimized mining state
             info!("Initializing optimized mining state...");
             let num_workers = num_cpus::get().min(8); // Limit workers to reasonable number
