@@ -379,11 +379,13 @@ pub fn create_mining_driver(
             }
             enable_mining(&handle, mine).await?;
 
+            // Send initialization signal BEFORE starting mining loop
             if let Some(tx) = init_complete_tx {
                 tx.send(()).map_err(|_| {
                     warn!("Could not send driver initialization for mining driver.");
                     NockAppError::OtherError
                 })?;
+                info!("🚀 Mining driver initialized successfully!");
             }
 
             if !mine {
