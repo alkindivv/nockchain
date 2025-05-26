@@ -2,6 +2,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::checkpoint::JamPaths;
@@ -76,18 +78,184 @@ impl FromStr for MiningKeyConfig {
     }
 }
 
+// Mining statistics structure
+#[derive(Debug, Clone)]
+pub struct MiningStats {
+    pub start_time: Instant,
+    pub total_attempts: AtomicU64,
+    pub successful_blocks: AtomicU64,
+    pub failed_attempts: AtomicU64,
+    pub active_workers: AtomicU32,
+    pub total_hash_rate: AtomicU64,
+    pub last_block_time: Arc<Mutex<Option<Instant>>>,
+    pub average_attempt_time: Arc<Mutex<Duration>>,
+    pub worker_stats: Arc<Mutex<Vec<WorkerStats>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerStats {
+    pub worker_id: usize,
+    pub attempts: u64,
+    pub successes: u64,
+    pub last_attempt_time: Option<Instant>,
+    pub average_time_per_attempt: Duration,
+}
+
+impl MiningStats {
+    pub fn new(num_workers: usize) -> Self {
+        let worker_stats = (0..num_workers)
+            .map(|id| WorkerStats {
+                worker_id: id,
+                attempts: 0,
+                successes: 0,
+                last_attempt_time: None,
+                average_time_per_attempt: Duration::from_secs(0),
+            })
+            .collect();
+
+        Self {
+            start_time: Instant::now(),
+            total_attempts: AtomicU64::new(0),
+            successful_blocks: AtomicU64::new(0),
+            failed_attempts: AtomicU64::new(0),
+            active_workers: AtomicU32::new(num_workers as u32),
+            total_hash_rate: AtomicU64::new(0),
+            last_block_time: Arc::new(Mutex::new(None)),
+            average_attempt_time: Arc::new(Mutex::new(Duration::from_secs(0))),
+            worker_stats: Arc::new(Mutex::new(worker_stats)),
+        }
+    }
+
+    pub async fn record_attempt(&self, worker_id: usize, duration: Duration, success: bool) {
+        self.total_attempts.fetch_add(1, Ordering::Relaxed);
+
+        if success {
+            self.successful_blocks.fetch_add(1, Ordering::Relaxed);
+            let mut last_block = self.last_block_time.lock().await;
+            *last_block = Some(Instant::now());
+        } else {
+            self.failed_attempts.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Update worker stats
+        let mut workers = self.worker_stats.lock().await;
+        if let Some(worker) = workers.get_mut(worker_id) {
+            worker.attempts += 1;
+            if success {
+                worker.successes += 1;
+            }
+            worker.last_attempt_time = Some(Instant::now());
+
+            // Update average time (simple moving average)
+            let total_time = worker.average_time_per_attempt.as_nanos() as u64 * (worker.attempts - 1) + duration.as_nanos() as u64;
+            worker.average_time_per_attempt = Duration::from_nanos(total_time / worker.attempts);
+        }
+
+        // Update global average
+        let mut avg_time = self.average_attempt_time.lock().await;
+        let total_attempts = self.total_attempts.load(Ordering::Relaxed);
+        let total_time = avg_time.as_nanos() as u64 * (total_attempts - 1) + duration.as_nanos() as u64;
+        *avg_time = Duration::from_nanos(total_time / total_attempts);
+    }
+
+    pub async fn get_stats_summary(&self) -> String {
+        let uptime = self.start_time.elapsed();
+        let total_attempts = self.total_attempts.load(Ordering::Relaxed);
+        let successful_blocks = self.successful_blocks.load(Ordering::Relaxed);
+        let failed_attempts = self.failed_attempts.load(Ordering::Relaxed);
+        let active_workers = self.active_workers.load(Ordering::Relaxed);
+
+        let success_rate = if total_attempts > 0 {
+            (successful_blocks as f64 / total_attempts as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let attempts_per_second = if uptime.as_secs() > 0 {
+            total_attempts as f64 / uptime.as_secs() as f64
+        } else {
+            0.0
+        };
+
+        let last_block = self.last_block_time.lock().await;
+        let time_since_last_block = match *last_block {
+            Some(time) => format!("{:.1}s ago", time.elapsed().as_secs_f64()),
+            None => "Never".to_string(),
+        };
+
+        let avg_time = self.average_attempt_time.lock().await;
+
+        format!(
+            "🚀 NOCKCHAIN MINING STATS 🚀\n\
+            ═══════════════════════════════════════\n\
+            ⏱️  Uptime: {:.1}s\n\
+            🔨 Total Attempts: {}\n\
+            ✅ Successful Blocks: {}\n\
+            ❌ Failed Attempts: {}\n\
+            📊 Success Rate: {:.2}%\n\
+            ⚡ Attempts/sec: {:.2}\n\
+            👷 Active Workers: {}\n\
+            🕒 Avg Attempt Time: {:.3}s\n\
+            🏆 Last Block Found: {}\n\
+            ═══════════════════════════════════════",
+            uptime.as_secs_f64(),
+            total_attempts,
+            successful_blocks,
+            failed_attempts,
+            success_rate,
+            attempts_per_second,
+            active_workers,
+            avg_time.as_secs_f64(),
+            time_since_last_block
+        )
+    }
+
+    pub async fn get_worker_stats(&self) -> String {
+        let workers = self.worker_stats.lock().await;
+        let mut result = String::from("👷 WORKER STATISTICS 👷\n");
+        result.push_str("═══════════════════════════════════════\n");
+
+        for worker in workers.iter() {
+            let success_rate = if worker.attempts > 0 {
+                (worker.successes as f64 / worker.attempts as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let last_activity = match worker.last_attempt_time {
+                Some(time) => format!("{:.1}s ago", time.elapsed().as_secs_f64()),
+                None => "Never".to_string(),
+            };
+
+            result.push_str(&format!(
+                "Worker {}: {} attempts, {} blocks ({:.1}%), avg {:.3}s, last: {}\n",
+                worker.worker_id,
+                worker.attempts,
+                worker.successes,
+                success_rate,
+                worker.average_time_per_attempt.as_secs_f64(),
+                last_activity
+            ));
+        }
+
+        result
+    }
+}
+
 // Optimized mining state management
 #[derive(Clone)]
 struct OptimizedMiningState {
     hot_state: Arc<Vec<HotEntry>>,
     kernel_pool: Arc<Mutex<VecDeque<(Kernel, TempDir)>>>,
     snapshot_base_path: Arc<PathBuf>,
+    stats: Arc<MiningStats>,
 }
 
 impl OptimizedMiningState {
-    async fn new() -> Self {
+    async fn new(num_workers: usize) -> Self {
         let hot_state = Arc::new(zkvm_jetpack::hot::produce_prover_hot_state());
         let kernel_pool = Arc::new(Mutex::new(VecDeque::new()));
+        let stats = Arc::new(MiningStats::new(num_workers));
 
         // Create base snapshot directory
         let snapshot_base = tempfile::tempdir()
@@ -122,6 +290,7 @@ impl OptimizedMiningState {
             hot_state,
             kernel_pool,
             snapshot_base_path,
+            stats,
         }
     }
 
@@ -206,13 +375,13 @@ pub fn create_mining_driver(
 
             // Initialize optimized mining state
             info!("Initializing optimized mining state...");
-            let mining_state = OptimizedMiningState::new().await;
+            let num_workers = num_cpus::get().min(8); // Limit workers to reasonable number
+            let mining_state = OptimizedMiningState::new(num_workers).await;
 
             // Create channels for worker communication
             let (result_tx, mut result_rx) = mpsc::unbounded_channel::<NounSlab>();
 
             // Create multiple worker channels
-            let num_workers = num_cpus::get().min(8); // Limit workers to reasonable number
             info!("Starting {} mining workers", num_workers);
 
             let mut worker_txs = Vec::new();
@@ -291,8 +460,16 @@ async fn optimized_mining_worker(
     while let Some(candidate) = candidate_rx.recv().await {
         debug!("Worker {} processing candidate", worker_id);
 
-        if let Some(result) = optimized_mining_attempt(candidate, &mining_state).await {
-            if let Err(_) = result_tx.send(result) {
+        let start_time = Instant::now();
+        let result = optimized_mining_attempt(candidate, &mining_state).await;
+        let duration = start_time.elapsed();
+
+        let success = result.is_some();
+        mining_state.stats.record_attempt(worker_id, duration, success).await;
+
+        if let Some(result_slab) = result {
+            info!("🎉 Worker {} found a block! Duration: {:.3}s", worker_id, duration.as_secs_f64());
+            if let Err(_) = result_tx.send(result_slab) {
                 warn!("Worker {} failed to send result", worker_id);
                 break;
             }
