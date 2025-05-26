@@ -94,7 +94,6 @@ impl OptimizedMiningState {
             .expect("Failed to create base snapshot directory");
         let snapshot_base_path = Arc::new(
             snapshot_base.keep()
-                .map_err(|e| format!("Failed to keep temp directory: {}", e))
                 .expect("Failed to keep temp directory")
         );
 
