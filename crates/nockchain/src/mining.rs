@@ -260,7 +260,7 @@ impl MiningStats {
 
 // Optimized mining state management
 #[derive(Clone)]
-struct OptimizedMiningState {
+pub struct OptimizedMiningState {
     hot_state: Arc<Vec<HotEntry>>,
     kernel_pool: Arc<Mutex<VecDeque<(Kernel, TempDir)>>>,
     snapshot_base_path: Arc<PathBuf>,
@@ -277,7 +277,7 @@ impl OptimizedMiningState {
         let snapshot_base = tempfile::tempdir()
             .expect("Failed to create base snapshot directory");
         let snapshot_base_path = Arc::new(
-            snapshot_base.into_path()
+            snapshot_base.keep().expect("Failed to keep temp directory")
         );
 
         // Pre-warm kernel pool with multiple instances
