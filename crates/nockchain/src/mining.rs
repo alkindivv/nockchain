@@ -382,17 +382,53 @@ pub fn create_mining_driver(
                 && configs[0].keys.len() == 1
             {
                 info!("Using simple mining key configuration");
-                set_mining_key(&handle, configs[0].keys[0].clone()).await?;
-                info!("✅ Simple mining key set successfully");
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    set_mining_key(&handle, configs[0].keys[0].clone())
+                ).await {
+                    Ok(Ok(_)) => info!("✅ Simple mining key set successfully"),
+                    Ok(Err(e)) => {
+                        warn!("Failed to set mining key: {:?}", e);
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        warn!("Timeout setting mining key");
+                        return Err(NockAppError::OtherError);
+                    }
+                }
             } else {
                 info!("Using advanced mining key configuration");
-                set_mining_key_advanced(&handle, configs).await?;
-                info!("✅ Advanced mining key set successfully");
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    set_mining_key_advanced(&handle, configs)
+                ).await {
+                    Ok(Ok(_)) => info!("✅ Advanced mining key set successfully"),
+                    Ok(Err(e)) => {
+                        warn!("Failed to set advanced mining key: {:?}", e);
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        warn!("Timeout setting advanced mining key");
+                        return Err(NockAppError::OtherError);
+                    }
+                }
             }
 
             info!("⚡ Enabling mining...");
-            enable_mining(&handle, mine).await?;
-            info!("✅ Mining enabled successfully");
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                enable_mining(&handle, mine)
+            ).await {
+                Ok(Ok(_)) => info!("✅ Mining enabled successfully"),
+                Ok(Err(e)) => {
+                    warn!("Failed to enable mining: {:?}", e);
+                    return Err(e);
+                }
+                Err(_) => {
+                    warn!("Timeout enabling mining");
+                    return Err(NockAppError::OtherError);
+                }
+            }
 
             // Send initialization signal BEFORE starting mining loop
             if let Some(tx) = init_complete_tx {
