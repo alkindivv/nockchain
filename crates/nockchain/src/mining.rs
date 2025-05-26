@@ -1,4 +1,7 @@
 use std::str::FromStr;
+use std::sync::Arc;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::checkpoint::JamPaths;
@@ -10,8 +13,9 @@ use nockapp::noun::slab::NounSlab;
 use nockapp::noun::{AtomExt, NounExt};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
-use tempfile::tempdir;
-use tracing::{instrument, warn};
+use tempfile::{tempdir, TempDir};
+use tracing::{instrument, warn, info, debug};
+use tokio::sync::{mpsc, Mutex};
 
 pub enum MiningWire {
     Mined,
@@ -71,6 +75,87 @@ impl FromStr for MiningKeyConfig {
     }
 }
 
+// Optimized mining state management
+#[derive(Clone)]
+struct OptimizedMiningState {
+    hot_state: Arc<Vec<zkvm_jetpack::hot::HotEntry>>,
+    kernel_pool: Arc<Mutex<VecDeque<(Kernel, TempDir)>>>,
+    snapshot_base_path: Arc<PathBuf>,
+}
+
+impl OptimizedMiningState {
+    async fn new() -> Self {
+        let hot_state = Arc::new(zkvm_jetpack::hot::produce_prover_hot_state());
+        let kernel_pool = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Create base snapshot directory
+        let snapshot_base = tempfile::tempdir()
+            .expect("Failed to create base snapshot directory");
+        let snapshot_base_path = Arc::new(snapshot_base.into_path());
+
+        // Pre-warm kernel pool with multiple instances
+        let num_cores = num_cpus::get();
+        let pool_size = (num_cores * 2).min(8); // Limit to reasonable number
+
+        info!("Pre-warming kernel pool with {} instances", pool_size);
+
+        let mut pool = kernel_pool.lock().await;
+        for i in 0..pool_size {
+            match Self::create_kernel_instance(&hot_state, &snapshot_base_path, i).await {
+                Ok((kernel, temp_dir)) => {
+                    pool.push_back((kernel, temp_dir));
+                }
+                Err(e) => {
+                    warn!("Failed to create kernel instance {}: {:?}", i, e);
+                }
+            }
+        }
+
+        info!("Kernel pool initialized with {} instances", pool.len());
+
+        Self {
+            hot_state,
+            kernel_pool,
+            snapshot_base_path,
+        }
+    }
+
+    async fn create_kernel_instance(
+        hot_state: &[zkvm_jetpack::hot::HotEntry],
+        base_path: &PathBuf,
+        instance_id: usize,
+    ) -> Result<(Kernel, TempDir), Box<dyn std::error::Error + Send + Sync>> {
+        let snapshot_dir = tempfile::tempdir_in(base_path)?;
+        let snapshot_path_buf = snapshot_dir.path().to_path_buf();
+        let jam_paths = JamPaths::new(snapshot_dir.path());
+
+        debug!("Creating kernel instance {} at {:?}", instance_id, snapshot_path_buf);
+
+        let kernel = Kernel::load_with_hot_state_huge(
+            snapshot_path_buf,
+            jam_paths,
+            KERNEL,
+            hot_state,
+            false,
+        ).await?;
+
+        Ok((kernel, snapshot_dir))
+    }
+
+    async fn get_kernel(&self) -> Option<(Kernel, TempDir)> {
+        let mut pool = self.kernel_pool.lock().await;
+        pool.pop_front()
+    }
+
+    async fn return_kernel(&self, kernel: Kernel, temp_dir: TempDir) {
+        let mut pool = self.kernel_pool.lock().await;
+        if pool.len() < 8 { // Don't let pool grow too large
+            pool.push_back((kernel, temp_dir));
+        }
+        // If pool is full, just drop the kernel (temp_dir will be cleaned up)
+    }
+}
+
 pub fn create_mining_driver(
     mining_config: Option<Vec<MiningKeyConfig>>,
     mine: bool,
@@ -90,6 +175,7 @@ pub fn create_mining_driver(
 
                 return Ok(());
             };
+
             if configs.len() == 1
                 && configs[0].share == 1
                 && configs[0].m == 1
@@ -111,15 +197,47 @@ pub fn create_mining_driver(
             if !mine {
                 return Ok(());
             }
-            let mut next_attempt: Option<NounSlab> = None;
-            let mut current_attempt: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+            // Initialize optimized mining state
+            info!("Initializing optimized mining state...");
+            let mining_state = OptimizedMiningState::new().await;
+
+            // Create channels for worker communication
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel::<NounSlab>();
+
+            // Create multiple worker channels
+            let num_workers = num_cpus::get().min(8); // Limit workers to reasonable number
+            info!("Starting {} mining workers", num_workers);
+
+            let mut worker_txs = Vec::new();
+            for worker_id in 0..num_workers {
+                let (worker_tx, worker_rx) = mpsc::unbounded_channel::<NounSlab>();
+                worker_txs.push(worker_tx);
+
+                let worker_result_tx = result_tx.clone();
+                let worker_mining_state = mining_state.clone();
+
+                tokio::spawn(async move {
+                    optimized_mining_worker(
+                        worker_id,
+                        worker_rx,
+                        worker_result_tx,
+                        worker_mining_state,
+                    ).await;
+                });
+            }
+
+            // Drop the original result_tx to avoid keeping it alive
+            drop(result_tx);
+
+            let mut current_worker = 0;
 
             loop {
                 tokio::select! {
                     effect_res = handle.next_effect() => {
                         let Ok(effect) = effect_res else {
-                          warn!("Error receiving effect in mining driver: {effect_res:?}");
-                        continue;
+                            warn!("Error receiving effect in mining driver: {effect_res:?}");
+                            continue;
                         };
                         let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
                             drop(effect);
@@ -132,27 +250,23 @@ pub fn create_mining_driver(
                                 slab.copy_into(effect_cell.tail());
                                 slab
                             };
-                            if !current_attempt.is_empty() {
-                                next_attempt = Some(candidate_slab);
-                            } else {
-                                let (cur_handle, attempt_handle) = handle.dup();
-                                handle = cur_handle;
-                                current_attempt.spawn(mining_attempt(candidate_slab, attempt_handle));
+
+                            // Send to next available worker (round-robin)
+                            if let Some(worker_tx) = worker_txs.get(current_worker) {
+                                if let Err(_) = worker_tx.send(candidate_slab) {
+                                    warn!("Failed to send candidate to worker {}", current_worker);
+                                }
+                                current_worker = (current_worker + 1) % num_workers;
                             }
                         }
                     },
-                    mining_attempt_res = current_attempt.join_next(), if !current_attempt.is_empty()  => {
-                        if let Some(Err(e)) = mining_attempt_res {
-                            warn!("Error during mining attempt: {e:?}");
+                    result = result_rx.recv() => {
+                        if let Some(result_slab) = result {
+                            handle
+                                .poke(MiningWire::Mined.to_wire(), result_slab)
+                                .await
+                                .expect("Could not poke nockchain with mined PoW");
                         }
-                        let Some(candidate_slab) = next_attempt else {
-                            continue;
-                        };
-                        next_attempt = None;
-                        let (cur_handle, attempt_handle) = handle.dup();
-                        handle = cur_handle;
-                        current_attempt.spawn(mining_attempt(candidate_slab, attempt_handle));
-
                     }
                 }
             }
@@ -160,6 +274,85 @@ pub fn create_mining_driver(
     })
 }
 
+async fn optimized_mining_worker(
+    worker_id: usize,
+    mut candidate_rx: mpsc::UnboundedReceiver<NounSlab>,
+    result_tx: mpsc::UnboundedSender<NounSlab>,
+    mining_state: OptimizedMiningState,
+) {
+    info!("Mining worker {} started", worker_id);
+
+    while let Some(candidate) = candidate_rx.recv().await {
+        debug!("Worker {} processing candidate", worker_id);
+
+        if let Some(result) = optimized_mining_attempt(candidate, &mining_state).await {
+            if let Err(_) = result_tx.send(result) {
+                warn!("Worker {} failed to send result", worker_id);
+                break;
+            }
+        }
+    }
+
+    info!("Mining worker {} stopped", worker_id);
+}
+
+pub async fn optimized_mining_attempt(
+    candidate: NounSlab,
+    mining_state: &OptimizedMiningState,
+) -> Option<NounSlab> {
+    // Get kernel from pool or create new one
+    let (kernel, temp_dir) = match mining_state.get_kernel().await {
+        Some((kernel, temp_dir)) => (kernel, temp_dir),
+        None => {
+            debug!("Creating new kernel instance for mining attempt");
+            match OptimizedMiningState::create_kernel_instance(
+                &mining_state.hot_state,
+                &mining_state.snapshot_base_path,
+                0,
+            ).await {
+                Ok((kernel, temp_dir)) => (kernel, temp_dir),
+                Err(e) => {
+                    warn!("Failed to create kernel instance: {:?}", e);
+                    return None;
+                }
+            }
+        }
+    };
+
+    // Perform the actual mining computation
+    let result = match kernel
+        .poke(MiningWire::Candidate.to_wire(), candidate)
+        .await
+    {
+        Ok(effects_slab) => {
+            let mut result_slab = None;
+
+            for effect in effects_slab.to_vec() {
+                let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
+                    drop(effect);
+                    continue;
+                };
+                if effect_cell.head().eq_bytes("command") {
+                    result_slab = Some(effect);
+                    break;
+                }
+            }
+
+            result_slab
+        }
+        Err(e) => {
+            warn!("Mining attempt failed: {:?}", e);
+            None
+        }
+    };
+
+    // Return kernel to pool
+    mining_state.return_kernel(kernel, temp_dir).await;
+
+    result
+}
+
+// Legacy mining attempt function (kept for compatibility)
 pub async fn mining_attempt(candidate: NounSlab, handle: NockAppHandle) -> () {
     let snapshot_dir =
         tokio::task::spawn_blocking(|| tempdir().expect("Failed to create temporary directory"))
