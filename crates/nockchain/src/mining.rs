@@ -277,7 +277,7 @@ impl OptimizedMiningState {
         let snapshot_base = tempfile::tempdir()
             .expect("Failed to create base snapshot directory");
         let snapshot_base_path = Arc::new(
-            snapshot_base.into_path()
+            snapshot_base.keep().expect("Failed to keep temp directory")
         );
 
         // Pre-warm kernel pool with multiple instances
@@ -375,6 +375,9 @@ pub fn create_mining_driver(
 
             info!("✅ Mining config found with {} entries", configs.len());
 
+            // Clone configs for later retry use
+            let configs_clone = configs.clone();
+
             info!("🔑 Setting up mining keys...");
             if configs.len() == 1
                 && configs[0].share == 1
@@ -449,18 +452,27 @@ pub fn create_mining_driver(
 
             // Now try to set mining key again after system is ready
             info!("🔄 Retrying mining key setup after system initialization...");
-            if configs.len() == 1
-                && configs[0].share == 1
-                && configs[0].m == 1
-                && configs[0].keys.len() == 1
+            if configs_clone.len() == 1
+                && configs_clone[0].share == 1
+                && configs_clone[0].m == 1
+                && configs_clone[0].keys.len() == 1
             {
                 match tokio::time::timeout(
                     Duration::from_secs(5),
-                    set_mining_key(&handle, configs[0].keys[0].clone())
+                    set_mining_key(&handle, configs_clone[0].keys[0].clone())
                 ).await {
                     Ok(Ok(_)) => info!("✅ Mining key set successfully after retry"),
                     Ok(Err(e)) => warn!("Failed to set mining key on retry: {:?}", e),
                     Err(_) => warn!("Timeout setting mining key on retry"),
+                }
+            } else {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    set_mining_key_advanced(&handle, configs_clone)
+                ).await {
+                    Ok(Ok(_)) => info!("✅ Advanced mining key set successfully after retry"),
+                    Ok(Err(e)) => warn!("Failed to set advanced mining key on retry: {:?}", e),
+                    Err(_) => warn!("Timeout setting advanced mining key on retry"),
                 }
             }
 
