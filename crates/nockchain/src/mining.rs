@@ -12,6 +12,7 @@ use nockapp::nockapp::NockAppError;
 use nockapp::noun::slab::NounSlab;
 use nockapp::noun::{AtomExt, NounExt};
 use nockvm::noun::{Atom, D, T};
+use nockvm::jets::hot::HotEntry;
 use nockvm_macros::tas;
 use tempfile::{tempdir, TempDir};
 use tracing::{instrument, warn, info, debug};
@@ -78,7 +79,7 @@ impl FromStr for MiningKeyConfig {
 // Optimized mining state management
 #[derive(Clone)]
 struct OptimizedMiningState {
-    hot_state: Arc<Vec<zkvm_jetpack::hot::HotEntry>>,
+    hot_state: Arc<Vec<HotEntry>>,
     kernel_pool: Arc<Mutex<VecDeque<(Kernel, TempDir)>>>,
     snapshot_base_path: Arc<PathBuf>,
 }
@@ -91,7 +92,7 @@ impl OptimizedMiningState {
         // Create base snapshot directory
         let snapshot_base = tempfile::tempdir()
             .expect("Failed to create base snapshot directory");
-        let snapshot_base_path = Arc::new(snapshot_base.into_path());
+        let snapshot_base_path = Arc::new(snapshot_base.keep().expect("Failed to keep temp directory"));
 
         // Pre-warm kernel pool with multiple instances
         let num_cores = num_cpus::get();
@@ -99,19 +100,21 @@ impl OptimizedMiningState {
 
         info!("Pre-warming kernel pool with {} instances", pool_size);
 
-        let mut pool = kernel_pool.lock().await;
-        for i in 0..pool_size {
-            match Self::create_kernel_instance(&hot_state, &snapshot_base_path, i).await {
-                Ok((kernel, temp_dir)) => {
-                    pool.push_back((kernel, temp_dir));
-                }
-                Err(e) => {
-                    warn!("Failed to create kernel instance {}: {:?}", i, e);
+        {
+            let mut pool = kernel_pool.lock().await;
+            for i in 0..pool_size {
+                match Self::create_kernel_instance(&hot_state, &snapshot_base_path, i).await {
+                    Ok((kernel, temp_dir)) => {
+                        pool.push_back((kernel, temp_dir));
+                    }
+                    Err(e) => {
+                        warn!("Failed to create kernel instance {}: {:?}", i, e);
+                    }
                 }
             }
-        }
 
-        info!("Kernel pool initialized with {} instances", pool.len());
+            info!("Kernel pool initialized with {} instances", pool.len());
+        }
 
         Self {
             hot_state,
@@ -121,11 +124,12 @@ impl OptimizedMiningState {
     }
 
     async fn create_kernel_instance(
-        hot_state: &[zkvm_jetpack::hot::HotEntry],
+        hot_state: &[HotEntry],
         base_path: &PathBuf,
         instance_id: usize,
-    ) -> Result<(Kernel, TempDir), Box<dyn std::error::Error + Send + Sync>> {
-        let snapshot_dir = tempfile::tempdir_in(base_path)?;
+    ) -> Result<(Kernel, TempDir), String> {
+        let snapshot_dir = tempfile::tempdir_in(base_path)
+            .map_err(|e| format!("Failed to create temp dir: {}", e))?;
         let snapshot_path_buf = snapshot_dir.path().to_path_buf();
         let jam_paths = JamPaths::new(snapshot_dir.path());
 
@@ -137,7 +141,7 @@ impl OptimizedMiningState {
             KERNEL,
             hot_state,
             false,
-        ).await?;
+        ).await.map_err(|e| format!("Failed to load kernel: {:?}", e))?;
 
         Ok((kernel, snapshot_dir))
     }
@@ -161,7 +165,7 @@ pub fn create_mining_driver(
     mine: bool,
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> IODriverFn {
-    Box::new(move |mut handle| {
+    Box::new(move |handle| {
         Box::pin(async move {
             let Some(configs) = mining_config else {
                 enable_mining(&handle, false).await?;

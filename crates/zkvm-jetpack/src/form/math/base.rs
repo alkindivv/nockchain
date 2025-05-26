@@ -7,7 +7,6 @@ pub const H: u64 = 20033703337;
 pub const ORDER: u64 = 2_u64.pow(32);
 
 // Precomputed constants for optimization
-const PRIME_MINUS_ONE: u64 = PRIME - 1;
 const REDUCTION_MASK: u64 = (1u64 << 32) - 1; // 2^32 - 1
 
 #[derive(Debug)]
