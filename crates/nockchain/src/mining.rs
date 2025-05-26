@@ -355,10 +355,15 @@ pub fn create_mining_driver(
 ) -> IODriverFn {
     Box::new(move |handle| {
         Box::pin(async move {
+            info!("🔧 Mining driver starting initialization...");
+            info!("Mining config present: {}, Mine enabled: {}", mining_config.is_some(), mine);
+
             let Some(configs) = mining_config else {
+                info!("❌ No mining config provided, disabling mining");
                 enable_mining(&handle, false).await?;
 
                 if let Some(tx) = init_complete_tx {
+                    info!("📤 Sending mining driver init signal (no config)");
                     tx.send(()).map_err(|_| {
                         warn!("Could not send driver initialization for mining driver.");
                         NockAppError::OtherError
@@ -368,16 +373,26 @@ pub fn create_mining_driver(
                 return Ok(());
             };
 
+            info!("✅ Mining config found with {} entries", configs.len());
+
+            info!("🔑 Setting up mining keys...");
             if configs.len() == 1
                 && configs[0].share == 1
                 && configs[0].m == 1
                 && configs[0].keys.len() == 1
             {
+                info!("Using simple mining key configuration");
                 set_mining_key(&handle, configs[0].keys[0].clone()).await?;
+                info!("✅ Simple mining key set successfully");
             } else {
+                info!("Using advanced mining key configuration");
                 set_mining_key_advanced(&handle, configs).await?;
+                info!("✅ Advanced mining key set successfully");
             }
+
+            info!("⚡ Enabling mining...");
             enable_mining(&handle, mine).await?;
+            info!("✅ Mining enabled successfully");
 
             // Send initialization signal BEFORE starting mining loop
             if let Some(tx) = init_complete_tx {
