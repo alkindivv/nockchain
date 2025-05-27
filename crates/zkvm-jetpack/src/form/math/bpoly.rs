@@ -312,19 +312,27 @@ pub fn bpdvr(a: &[Belt], b: &[Belt], q: &mut [Belt], res: &mut [Belt]) {
 
     while deg_r >= deg_b {
         let coeff = r[i] / b[end_b];
-        q[q_index as usize] = coeff;
+        if q_index < q.len() as u32 {
+            q[q_index as usize] = coeff;
+        }
         for k in 0..(deg_b + 1) {
             let index = k as usize;
-            if k <= a_end as u32 && k < b.len() as u32 && k <= (i as u32) {
+            if k <= a_end as u32 && k < b.len() as u32 && k <= (i as u32) && i >= index {
                 r[i - index] = r[i - index] - coeff * b[end_b - index];
             }
         }
-        deg_r = deg_r.saturating_sub(1);
-        q_index = q_index.saturating_sub(1);
-        if deg_r == 0 && r[0] == 0 {
+        if deg_r == 0 {
             break;
         }
-        i -= 1;
+        deg_r = deg_r.saturating_sub(1);
+        if q_index > 0 {
+            q_index = q_index.saturating_sub(1);
+        }
+        if i > 0 {
+            i -= 1;
+        } else {
+            break;
+        }
     }
 
     let r_len = deg_r + 1;
