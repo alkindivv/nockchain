@@ -386,50 +386,50 @@ pub fn create_mining_driver(
             {
                 info!("Using simple mining key configuration");
                 match tokio::time::timeout(
-                    Duration::from_secs(10),
+                    Duration::from_secs(30),
                     set_mining_key(&handle, configs[0].keys[0].clone())
                 ).await {
                     Ok(Ok(_)) => info!("✅ Simple mining key set successfully"),
                     Ok(Err(e)) => {
                         warn!("Failed to set mining key: {:?}", e);
-                        return Err(e);
+                        // Don't return error, continue to retry later
                     }
                     Err(_) => {
-                        warn!("Timeout setting mining key");
-                        return Err(NockAppError::OtherError);
+                        warn!("Timeout setting mining key, will retry after system initialization");
+                        // Don't return error, continue to retry later
                     }
                 }
             } else {
                 info!("Using advanced mining key configuration");
                 match tokio::time::timeout(
-                    Duration::from_secs(10),
+                    Duration::from_secs(30),
                     set_mining_key_advanced(&handle, configs)
                 ).await {
                     Ok(Ok(_)) => info!("✅ Advanced mining key set successfully"),
                     Ok(Err(e)) => {
                         warn!("Failed to set advanced mining key: {:?}", e);
-                        return Err(e);
+                        // Don't return error, continue to retry later
                     }
                     Err(_) => {
-                        warn!("Timeout setting advanced mining key");
-                        return Err(NockAppError::OtherError);
+                        warn!("Timeout setting advanced mining key, will retry after system initialization");
+                        // Don't return error, continue to retry later
                     }
                 }
             }
 
             info!("⚡ Enabling mining...");
             match tokio::time::timeout(
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 enable_mining(&handle, mine)
             ).await {
                 Ok(Ok(_)) => info!("✅ Mining enabled successfully"),
                 Ok(Err(e)) => {
                     warn!("Failed to enable mining: {:?}", e);
-                    return Err(e);
+                    // Don't return error, continue to retry later
                 }
                 Err(_) => {
-                    warn!("Timeout enabling mining");
-                    return Err(NockAppError::OtherError);
+                    warn!("Timeout enabling mining, will retry after system initialization");
+                    // Don't return error, continue to retry later
                 }
             }
 
@@ -448,42 +448,67 @@ pub fn create_mining_driver(
 
             // Wait a bit for all drivers to be fully ready
             info!("⏳ Waiting for system to be fully ready...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
 
-            // Now try to set mining key again after system is ready
-            info!("🔄 Retrying mining key setup after system initialization...");
-            if configs_clone.len() == 1
-                && configs_clone[0].share == 1
-                && configs_clone[0].m == 1
-                && configs_clone[0].keys.len() == 1
-            {
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    set_mining_key(&handle, configs_clone[0].keys[0].clone())
-                ).await {
-                    Ok(Ok(_)) => info!("✅ Mining key set successfully after retry"),
-                    Ok(Err(e)) => warn!("Failed to set mining key on retry: {:?}", e),
-                    Err(_) => warn!("Timeout setting mining key on retry"),
-                }
-            } else {
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    set_mining_key_advanced(&handle, configs_clone)
-                ).await {
-                    Ok(Ok(_)) => info!("✅ Advanced mining key set successfully after retry"),
-                    Ok(Err(e)) => warn!("Failed to set advanced mining key on retry: {:?}", e),
-                    Err(_) => warn!("Timeout setting advanced mining key on retry"),
-                }
-            }
+            // Multiple retry attempts with increasing delays
+            for retry_attempt in 1..=5 {
+                info!("🔄 Retry attempt {} - Setting up mining key...", retry_attempt);
 
-            // Try to enable mining again
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                enable_mining(&handle, true)
-            ).await {
-                Ok(Ok(_)) => info!("✅ Mining enabled successfully after retry"),
-                Ok(Err(e)) => warn!("Failed to enable mining on retry: {:?}", e),
-                Err(_) => warn!("Timeout enabling mining on retry"),
+                let mut key_success = false;
+                if configs_clone.len() == 1
+                    && configs_clone[0].share == 1
+                    && configs_clone[0].m == 1
+                    && configs_clone[0].keys.len() == 1
+                {
+                    match tokio::time::timeout(
+                        Duration::from_secs(15),
+                        set_mining_key(&handle, configs_clone[0].keys[0].clone())
+                    ).await {
+                        Ok(Ok(_)) => {
+                            info!("✅ Mining key set successfully on retry {}", retry_attempt);
+                            key_success = true;
+                        }
+                        Ok(Err(e)) => warn!("Failed to set mining key on retry {}: {:?}", retry_attempt, e),
+                        Err(_) => warn!("Timeout setting mining key on retry {}", retry_attempt),
+                    }
+                } else {
+                    match tokio::time::timeout(
+                        Duration::from_secs(15),
+                        set_mining_key_advanced(&handle, configs_clone.clone())
+                    ).await {
+                        Ok(Ok(_)) => {
+                            info!("✅ Advanced mining key set successfully on retry {}", retry_attempt);
+                            key_success = true;
+                        }
+                        Ok(Err(e)) => warn!("Failed to set advanced mining key on retry {}: {:?}", retry_attempt, e),
+                        Err(_) => warn!("Timeout setting advanced mining key on retry {}", retry_attempt),
+                    }
+                }
+
+                // Try to enable mining
+                let mut mining_success = false;
+                match tokio::time::timeout(
+                    Duration::from_secs(15),
+                    enable_mining(&handle, true)
+                ).await {
+                    Ok(Ok(_)) => {
+                        info!("✅ Mining enabled successfully on retry {}", retry_attempt);
+                        mining_success = true;
+                    }
+                    Ok(Err(e)) => warn!("Failed to enable mining on retry {}: {:?}", retry_attempt, e),
+                    Err(_) => warn!("Timeout enabling mining on retry {}", retry_attempt),
+                }
+
+                if key_success && mining_success {
+                    info!("🎉 Mining setup completed successfully!");
+                    break;
+                }
+
+                if retry_attempt < 5 {
+                    let delay = retry_attempt * 3;
+                    info!("⏳ Waiting {}s before next retry...", delay);
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                }
             }
 
             // Initialize optimized mining state
